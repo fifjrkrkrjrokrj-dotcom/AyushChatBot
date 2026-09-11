@@ -11,10 +11,22 @@ USERBOT_SESSIONS = mongo["SessionDB"]["sessions"] if mongo is not None else None
 #     "username": str,
 #     "name": str,
 #     "phone": str,
+#     "added_by": int,
 #     "autochat": bool,
+#     "reply_delay": int,
+#     "speed_mode": str,
 #     "status": str,
 # }
 accounts = {}
+
+
+def _get_owner_id() -> int | None:
+    if config.OWNER_ID:
+        try:
+            return int(config.OWNER_ID)
+        except Exception:
+            return None
+    return None
 
 
 async def get_served_accounts() -> list:
@@ -24,9 +36,33 @@ async def get_served_accounts() -> list:
     accounts_list = []
     try:
         async for account in USERBOT_ACCOUNTS.find({"enabled": True}):
+            if "added_by" not in account or not account["added_by"]:
+                account["added_by"] = _get_owner_id()
             accounts_list.append(account)
     except Exception as e:
         print(f"⚠️ Error fetching served accounts: {e}")
+    return accounts_list
+
+
+async def get_accounts_by_user(user_id: int) -> list:
+    """
+    Get userbot accounts accessible by a specific user.
+    If owner, returns all accounts.
+    If admin, returns only accounts added by that admin.
+    """
+    from Radhe.database.admins import is_owner
+    if is_owner(user_id):
+        return await get_served_accounts()
+
+    if USERBOT_ACCOUNTS is None:
+        return []
+
+    accounts_list = []
+    try:
+        async for account in USERBOT_ACCOUNTS.find({"enabled": True, "added_by": int(user_id)}):
+            accounts_list.append(account)
+    except Exception as e:
+        print(f"⚠️ Error fetching accounts for user {user_id}: {e}")
     return accounts_list
 
 
@@ -35,7 +71,10 @@ async def get_account(account_id: str) -> dict:
     if USERBOT_ACCOUNTS is None:
         return None
     try:
-        return await USERBOT_ACCOUNTS.find_one({"account_id": account_id, "enabled": True})
+        acc = await USERBOT_ACCOUNTS.find_one({"account_id": account_id, "enabled": True})
+        if acc and ("added_by" not in acc or not acc["added_by"]):
+            acc["added_by"] = _get_owner_id()
+        return acc
     except Exception as e:
         print(f"⚠️ Error getting account {account_id}: {e}")
         return None
@@ -47,6 +86,11 @@ async def add_account(account_data: dict):
         return None
     try:
         account_data["updated_at"] = time.time()
+        if "added_by" not in account_data or not account_data["added_by"]:
+            account_data["added_by"] = _get_owner_id()
+        else:
+            account_data["added_by"] = int(account_data["added_by"])
+
         return await USERBOT_ACCOUNTS.update_one(
             {"account_id": account_data["account_id"]},
             {"$set": account_data},

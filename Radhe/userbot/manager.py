@@ -50,6 +50,13 @@ class AccountManager:
         reply_delay = account_doc.get("reply_delay", 0)
         speed_mode = account_doc.get("speed_mode", "fast")
 
+        added_by = account_doc.get("added_by")
+        if not added_by and config.OWNER_ID:
+            try:
+                added_by = int(config.OWNER_ID)
+            except Exception:
+                added_by = None
+
         session_string = await get_session(account_id)
         if not session_string:
             LOGGER.warning(f"⚠️ No session found for userbot account {account_id}")
@@ -74,6 +81,7 @@ class AccountManager:
                 "username": me.username or username,
                 "name": name or f"{me.first_name or ''} {me.last_name or ''}".strip(),
                 "phone": phone,
+                "added_by": added_by,
                 "autochat": autochat,
                 "reply_delay": reply_delay,
                 "speed_mode": speed_mode,
@@ -85,6 +93,7 @@ class AccountManager:
                 "status": "CONNECTED",
                 "username": me.username or username,
                 "name": ub_accounts[account_id]["name"],
+                "added_by": added_by,
             })
 
             # Register message handlers

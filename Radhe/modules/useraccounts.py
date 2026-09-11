@@ -4,8 +4,16 @@ from pyrogram import filters, enums
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from Radhe import Radhe, LOGGER, config
+from Radhe.database.admins import (
+    is_owner,
+    is_admin,
+    add_admin,
+    remove_admin,
+    get_admins,
+)
 from Radhe.userbot.storage import (
     get_served_accounts,
+    get_accounts_by_user,
     get_account,
     accounts as ub_accounts,
 )
@@ -16,16 +24,6 @@ from Radhe.userbot.auth import (
     process_otp_input,
     process_2fa_input,
 )
-
-
-def _is_owner(user_id: int) -> bool:
-    """Check if the user is the bot owner."""
-    if not config.OWNER_ID:
-        return True
-    try:
-        return int(user_id) == int(config.OWNER_ID)
-    except Exception:
-        return False
 
 
 def _mask_phone(phone: str) -> str:
@@ -52,56 +50,156 @@ def _format_speed_label(mode: str, delay: int) -> str:
         return f"⚙️ Custom ({delay}s)"
 
 
-async def _build_main_dashboard() -> tuple[str, InlineKeyboardMarkup]:
-    """Build the main list of all connected userbots."""
-    accounts_list = await get_served_accounts()
+async def _can_manage_account(user_id: int, account_id: str) -> tuple[bool, dict | None]:
+    """
+    Check if a user has permission to manage a specific userbot account.
+    Owner can manage all userbots.
+    Admins can only manage userbots they added.
+    """
+    if is_owner(user_id):
+        acc = await get_account(account_id)
+        return True, acc
 
-    if not accounts_list:
-        text = (
-            "👥 **USERBOT MANAGEMENT DASHBOARD**\n\n"
-            "📦 **No userbot accounts connected.**\n\n"
-            "Click **[ ➕ Add Userbot ]** below to link your Telegram account."
-        )
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Add Userbot", callback_data="ub_add")],
-            [InlineKeyboardButton("🔄 Refresh", callback_data="ub_main_refresh")],
-        ])
-        return text, markup
-
-    text = (
-        "👥 **USERBOT MANAGEMENT DASHBOARD**\n\n"
-        f"📦 **Connected Accounts:** `{len(accounts_list)}`\n\n"
-        "Select a userbot below to open its dedicated settings & controls:"
-    )
-
-    keyboard_rows = []
-    for index, acc in enumerate(accounts_list, 1):
-        account_id = acc["account_id"]
-        in_mem = ub_accounts.get(account_id, {})
-
-        name = in_mem.get("name", acc.get("name", "Unknown"))
-        username = in_mem.get("username", acc.get("username", ""))
-        user_tag = f"@{username}" if username else f"#{index}"
-
-        autochat_state = in_mem.get("autochat", acc.get("autochat", True))
-        status_icon = "🟢" if autochat_state else "🔴"
-
-        btn_text = f"👤 {index}. {name} ({user_tag}) • {status_icon}"
-        keyboard_rows.append([InlineKeyboardButton(btn_text, callback_data=f"ub_panel:{account_id}")])
-
-    keyboard_rows.append([
-        InlineKeyboardButton("➕ Add Userbot", callback_data="ub_add"),
-        InlineKeyboardButton("🔄 Refresh", callback_data="ub_main_refresh"),
-    ])
-
-    return text, InlineKeyboardMarkup(keyboard_rows)
-
-
-async def _build_userbot_panel(account_id: str) -> tuple[str, InlineKeyboardMarkup]:
-    """Build dedicated management panel for a single userbot."""
     acc = await get_account(account_id)
     if not acc:
-        return "❌ Userbot account not found.", InlineKeyboardMarkup([
+        return False, None
+
+    added_by = acc.get("added_by")
+    if added_by and int(added_by) == int(user_id):
+        return True, acc
+
+    return False, acc
+
+
+# ---------- UI Builders ----------
+
+async def _build_main_dashboard(viewer_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Build the main userbot management dashboard.
+    If viewer is Owner: displays ALL userbots (categorized) + Manage Admins button.
+    If viewer is Admin: displays ONLY userbots added by this admin.
+    """
+    user_is_owner = is_owner(viewer_id)
+
+    if user_is_owner:
+        all_accounts = await get_served_accounts()
+        owner_id = int(config.OWNER_ID) if config.OWNER_ID else viewer_id
+
+        owner_accs = []
+        admin_accs = []
+
+        for acc in all_accounts:
+            acc_added_by = acc.get("added_by")
+            if not acc_added_by or int(acc_added_by) == owner_id:
+                owner_accs.append(acc)
+            else:
+                admin_accs.append(acc)
+
+        total_count = len(all_accounts)
+        admins_list = await get_admins()
+
+        text = (
+            "👑 **MASTER USERBOT DASHBOARD (Owner View)**\n\n"
+            f"📦 **Total Connected Accounts:** `{total_count}`\n"
+            f"👑 **Owner Accounts:** `{len(owner_accs)}`\n"
+            f"👥 **Admin Accounts:** `{len(admin_accs)}`\n"
+            f"🛡 **Authorized Admins:** `{len(admins_list)}`\n\n"
+        )
+
+        keyboard_rows = []
+
+        if not all_accounts:
+            text += "ℹ️ *No userbot accounts connected yet.*\nClick **[ ➕ Add Userbot ]** to link an account."
+        else:
+            text += "Select any userbot below to open its dedicated settings & controls:\n"
+
+            # Owner accounts section
+            if owner_accs:
+                for idx, acc in enumerate(owner_accs, 1):
+                    account_id = acc["account_id"]
+                    in_mem = ub_accounts.get(account_id, {})
+                    name = in_mem.get("name", acc.get("name", "Unknown"))
+                    username = in_mem.get("username", acc.get("username", ""))
+                    user_tag = f"@{username}" if username else f"#{idx}"
+                    autochat_state = in_mem.get("autochat", acc.get("autochat", True))
+                    status_icon = "🟢" if autochat_state else "🔴"
+                    btn_text = f"👑 {name} ({user_tag}) • {status_icon}"
+                    keyboard_rows.append([InlineKeyboardButton(btn_text, callback_data=f"ub_panel:{account_id}")])
+
+            # Admin accounts section
+            if admin_accs:
+                for idx, acc in enumerate(admin_accs, 1):
+                    account_id = acc["account_id"]
+                    in_mem = ub_accounts.get(account_id, {})
+                    name = in_mem.get("name", acc.get("name", "Unknown"))
+                    username = in_mem.get("username", acc.get("username", ""))
+                    user_tag = f"@{username}" if username else f"#{idx}"
+                    added_by_id = acc.get("added_by", "Unknown")
+                    autochat_state = in_mem.get("autochat", acc.get("autochat", True))
+                    status_icon = "🟢" if autochat_state else "🔴"
+                    btn_text = f"👤 {name} ({user_tag}) [Admin: {added_by_id}] • {status_icon}"
+                    keyboard_rows.append([InlineKeyboardButton(btn_text, callback_data=f"ub_panel:{account_id}")])
+
+        keyboard_rows.append([
+            InlineKeyboardButton("➕ Add Userbot", callback_data="ub_add"),
+            InlineKeyboardButton("👑 Manage Admins", callback_data="ub_manage_admins"),
+        ])
+        keyboard_rows.append([
+            InlineKeyboardButton("🔄 Refresh", callback_data="ub_main_refresh"),
+        ])
+
+        return text, InlineKeyboardMarkup(keyboard_rows)
+
+    else:
+        # Admin view: Only accounts added by this admin
+        my_accounts = await get_accounts_by_user(viewer_id)
+
+        if not my_accounts:
+            text = (
+                "👥 **USERBOT MANAGEMENT DASHBOARD**\n\n"
+                "📦 **You have not connected any userbot account yet.**\n\n"
+                "Click **[ ➕ Add Userbot ]** below to link your Telegram account."
+            )
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Add Userbot", callback_data="ub_add")],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="ub_main_refresh")],
+            ])
+            return text, markup
+
+        text = (
+            "👥 **YOUR USERBOT DASHBOARD**\n\n"
+            f"📦 **Your Connected Accounts:** `{len(my_accounts)}`\n\n"
+            "Select a userbot below to open its dedicated settings & controls:"
+        )
+
+        keyboard_rows = []
+        for index, acc in enumerate(my_accounts, 1):
+            account_id = acc["account_id"]
+            in_mem = ub_accounts.get(account_id, {})
+
+            name = in_mem.get("name", acc.get("name", "Unknown"))
+            username = in_mem.get("username", acc.get("username", ""))
+            user_tag = f"@{username}" if username else f"#{index}"
+
+            autochat_state = in_mem.get("autochat", acc.get("autochat", True))
+            status_icon = "🟢" if autochat_state else "🔴"
+
+            btn_text = f"👤 {index}. {name} ({user_tag}) • {status_icon}"
+            keyboard_rows.append([InlineKeyboardButton(btn_text, callback_data=f"ub_panel:{account_id}")])
+
+        keyboard_rows.append([
+            InlineKeyboardButton("➕ Add Userbot", callback_data="ub_add"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="ub_main_refresh"),
+        ])
+
+        return text, InlineKeyboardMarkup(keyboard_rows)
+
+
+async def _build_userbot_panel(account_id: str, viewer_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Build dedicated management panel for a single userbot."""
+    can_manage, acc = await _can_manage_account(viewer_id, account_id)
+    if not can_manage or not acc:
+        return "❌ You are not authorized to view this userbot account.", InlineKeyboardMarkup([
             [InlineKeyboardButton("↩️ Back to Accounts", callback_data="ub_back_main")]
         ])
 
@@ -123,12 +221,22 @@ async def _build_userbot_panel(account_id: str) -> tuple[str, InlineKeyboardMark
     speed_mode = in_mem.get("speed_mode", acc.get("speed_mode", "fast"))
     speed_label = _format_speed_label(speed_mode, delay)
 
+    added_by = acc.get("added_by")
+    owner_id = int(config.OWNER_ID) if config.OWNER_ID else None
+    if added_by and owner_id and int(added_by) == owner_id:
+        creator_str = "👑 Owner"
+    elif added_by:
+        creator_str = f"👤 Admin (`{added_by}`)"
+    else:
+        creator_str = "👑 Owner"
+
     panel_text = (
         f"👤 **Userbot Panel: {name}**\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 **ID:** `{telegram_id}`\n"
         f"👤 **Username:** {username_str}\n"
         f"📱 **Phone:** `{phone_masked}`\n"
+        f"🛡 **Added By:** {creator_str}\n"
         f"📊 **Connection:** {status_str}\n"
         f"🤖 **AutoChat:** {autochat_label}\n"
         f"⚡ **Reply Speed:** {speed_label}\n"
@@ -151,11 +259,11 @@ async def _build_userbot_panel(account_id: str) -> tuple[str, InlineKeyboardMark
     return panel_text, markup
 
 
-async def _build_speed_menu(account_id: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _build_speed_menu(account_id: str, viewer_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Build speed configuration menu for a userbot."""
-    acc = await get_account(account_id)
-    if not acc:
-        return "❌ Userbot account not found.", InlineKeyboardMarkup([
+    can_manage, acc = await _can_manage_account(viewer_id, account_id)
+    if not can_manage or not acc:
+        return "❌ Unauthorized.", InlineKeyboardMarkup([
             [InlineKeyboardButton("↩️ Back", callback_data="ub_back_main")]
         ])
 
@@ -194,34 +302,206 @@ async def _build_speed_menu(account_id: str) -> tuple[str, InlineKeyboardMarkup]
     return speed_text, markup
 
 
-# ---------- Command Handler ----------
+async def _build_admin_management_panel() -> tuple[str, InlineKeyboardMarkup]:
+    """Build the Admin Management panel for the Bot Owner."""
+    admins_list = await get_admins()
+
+    text = (
+        "👑 **BOT ADMIN MANAGEMENT**\n\n"
+        "Admins added here can use `/useraccounts` to add and manage their own userbots.\n"
+        "Admins will **NOT** see your accounts, but you will have full control over all accounts.\n\n"
+        f"🛡 **Current Admins:** `{len(admins_list)}`\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    keyboard_rows = []
+
+    if not admins_list:
+        text += "ℹ️ *No admins added yet.*\nClick **[ ➕ Add Admin ]** to authorize a user."
+    else:
+        for idx, adm in enumerate(admins_list, 1):
+            adm_id = adm["user_id"]
+            adm_name = adm.get("name", "Admin")
+            adm_user = adm.get("username", "")
+            user_tag = f"@{adm_user}" if adm_user else f"ID: `{adm_id}`"
+            text += f"{idx}. 👤 **{adm_name}** ({user_tag})\n"
+            keyboard_rows.append([
+                InlineKeyboardButton(f"👤 {adm_name} ({adm_id})", callback_data=f"ub_noop"),
+                InlineKeyboardButton("🗑 Remove", callback_data=f"ub_deladmin_btn:{adm_id}"),
+            ])
+
+    keyboard_rows.append([
+        InlineKeyboardButton("➕ Add Admin", callback_data="ub_add_admin_prompt"),
+        InlineKeyboardButton("🔄 Refresh", callback_data="ub_manage_admins"),
+    ])
+    keyboard_rows.append([
+        InlineKeyboardButton("↩️ Back to Accounts", callback_data="ub_back_main"),
+    ])
+
+    return text, InlineKeyboardMarkup(keyboard_rows)
+
+
+# ---------- Command Handlers ----------
 
 @Radhe.on_cmd("useraccounts")
 async def useraccounts_cmd(_, m: Message):
-    """Owner-only command to open the userbot management dashboard."""
-    if not _is_owner(m.from_user.id):
-        return await m.reply("❌ You are not authorized to use this command.")
+    """Open the userbot management dashboard (Owner & Admins only)."""
+    user_id = m.from_user.id
+    if not (await is_admin(user_id)):
+        return await m.reply("❌ You are not authorized to use this command.\nOnly Bot Owner and authorized Admins can manage userbots.")
 
     if m.chat.type != enums.ChatType.PRIVATE:
         return await m.reply("❌ This command works only in private chat with the bot.")
 
-    text, markup = await _build_main_dashboard()
+    text, markup = await _build_main_dashboard(user_id)
     await m.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+
+
+@Radhe.on_cmd("addadmin")
+async def addadmin_cmd(client: Radhe, m: Message):
+    """Owner command to add an authorized admin via /addadmin <user_id/username/reply>."""
+    if not is_owner(m.from_user.id):
+        return await m.reply("❌ Only the Bot Owner can add admins.")
+
+    target_user_id = None
+    target_name = ""
+    target_username = ""
+
+    if m.reply_to_message and m.reply_to_message.from_user:
+        u = m.reply_to_message.from_user
+        target_user_id = u.id
+        target_name = f"{u.first_name or ''} {u.last_name or ''}".strip()
+        target_username = u.username or ""
+    elif len(m.command) > 1:
+        query = m.command[1].strip()
+        try:
+            if query.isdigit() or (query.startswith("-") and query[1:].isdigit()):
+                target_user_id = int(query)
+            else:
+                user_obj = await client.get_users(query)
+                target_user_id = user_obj.id
+                target_name = f"{user_obj.first_name or ''} {user_obj.last_name or ''}".strip()
+                target_username = user_obj.username or ""
+        except Exception as e:
+            return await m.reply(f"❌ User not found: {e}")
+
+    if not target_user_id:
+        pending_auth[m.from_user.id] = {
+            "step": "add_admin",
+            "created_at": time.time(),
+        }
+        return await m.reply(
+            "👑 **Add New Admin**\n\n"
+            "Please send the **Telegram User ID** or **@username** of the user you want to add as Admin.\n\n"
+            "Send /cancel to cancel.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="ub_cancel_admin_prompt")]
+            ])
+        )
+
+    # Try resolving user info if not fetched
+    if not target_name:
+        try:
+            user_obj = await client.get_users(target_user_id)
+            target_name = f"{user_obj.first_name or ''} {user_obj.last_name or ''}".strip()
+            target_username = user_obj.username or ""
+        except Exception:
+            target_name = f"User {target_user_id}"
+
+    success = await add_admin(target_user_id, added_by=m.from_user.id, name=target_name, username=target_username)
+    if success:
+        await m.reply(
+            "✅ **Admin Added Successfully!**\n\n"
+            f"👤 **Name:** {target_name}\n"
+            f"🆔 **ID:** `{target_user_id}`\n"
+            f"🔗 **Username:** @{target_username if target_username else '—'}\n\n"
+            "Now this user can use `/useraccounts` in bot PM to add and manage their own userbots!"
+        )
+    else:
+        await m.reply("❌ Failed to add admin to database.")
+
+
+@Radhe.on_cmd(["deladmin", "rmadmin"])
+async def deladmin_cmd(client: Radhe, m: Message):
+    """Owner command to remove an authorized admin via /deladmin <user_id/reply>."""
+    if not is_owner(m.from_user.id):
+        return await m.reply("❌ Only the Bot Owner can remove admins.")
+
+    target_user_id = None
+    if m.reply_to_message and m.reply_to_message.from_user:
+        target_user_id = m.reply_to_message.from_user.id
+    elif len(m.command) > 1:
+        query = m.command[1].strip()
+        try:
+            if query.isdigit() or (query.startswith("-") and query[1:].isdigit()):
+                target_user_id = int(query)
+            else:
+                user_obj = await client.get_users(query)
+                target_user_id = user_obj.id
+        except Exception as e:
+            return await m.reply(f"❌ User not found: {e}")
+
+    if not target_user_id:
+        return await m.reply("❌ Usage: `/deladmin <user_id>` or reply to a user message.")
+
+    success = await remove_admin(target_user_id)
+    if success:
+        await m.reply(f"🗑 **Admin `{target_user_id}` removed successfully!**")
+    else:
+        await m.reply(f"❌ Admin `{target_user_id}` was not found in admin list.")
+
+
+@Radhe.on_cmd("admins")
+async def admins_list_cmd(_, m: Message):
+    """View list of all authorized bot admins (Owner & Admins only)."""
+    user_id = m.from_user.id
+    if not (await is_admin(user_id)):
+        return await m.reply("❌ You are not authorized to view the admin list.")
+
+    owner_id = int(config.OWNER_ID) if config.OWNER_ID else "—"
+    owner_user = config.OWNER_USERNAME or "—"
+    admins_list = await get_admins()
+
+    text = (
+        "🛡 **BOT ADMINS LIST**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👑 **Owner:** `{owner_id}` (@{owner_user})\n\n"
+        f"👥 **Authorized Admins:** ({len(admins_list)})\n"
+    )
+
+    if not admins_list:
+        text += "*(No sub-admins added yet)*\n"
+    else:
+        for idx, adm in enumerate(admins_list, 1):
+            adm_id = adm["user_id"]
+            adm_name = adm.get("name", "Admin")
+            adm_user = adm.get("username", "")
+            user_tag = f"@{adm_user}" if adm_user else "—"
+            text += f"{idx}. 👤 **{adm_name}** (`{adm_id}`) | {user_tag}\n"
+
+    text += "━━━━━━━━━━━━━━━━━━━━━━"
+    await m.reply(text)
 
 
 # ---------- Callback Query Handlers (Group -1 to ensure priority) ----------
 
 @Radhe.on_callback_query(filters.regex(r"^ub_"), group=-1)
-async def useraccounts_callbacks(_, query: CallbackQuery):
+async def useraccounts_callbacks(client: Radhe, query: CallbackQuery):
     """Handle all useraccounts dashboard inline callbacks."""
-    if not _is_owner(query.from_user.id):
-        return await query.answer("❌ Unauthorized", show_alert=True)
-
+    user_id = query.from_user.id
     data = query.data
+
+    # Noop callback
+    if data == "ub_noop":
+        return await query.answer()
+
+    # Permission check: User must be admin or owner
+    if not (await is_admin(user_id)):
+        return await query.answer("❌ Unauthorized", show_alert=True)
 
     # Main Dashboard / Refresh
     if data in ("ub_main_refresh", "ub_back_main"):
-        text, markup = await _build_main_dashboard()
+        text, markup = await _build_main_dashboard(user_id)
         try:
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
         except Exception:
@@ -229,10 +509,12 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
         await query.answer("🔄 Dashboard refreshed")
         return
 
-    # Open Individual Userbot Panel
-    if data.startswith("ub_panel:"):
-        account_id = data.split(":", 1)[1]
-        text, markup = await _build_userbot_panel(account_id)
+    # Owner Admin Management Panel
+    if data == "ub_manage_admins":
+        if not is_owner(user_id):
+            return await query.answer("❌ Only Bot Owner can manage admins.", show_alert=True)
+
+        text, markup = await _build_admin_management_panel()
         try:
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
         except Exception:
@@ -240,9 +522,67 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
         await query.answer()
         return
 
-    # Add New Userbot
+    # Owner: Add Admin prompt
+    if data == "ub_add_admin_prompt":
+        if not is_owner(user_id):
+            return await query.answer("❌ Only Bot Owner can add admins.", show_alert=True)
+
+        pending_auth[user_id] = {
+            "step": "add_admin",
+            "created_at": time.time(),
+        }
+        await query.message.edit_text(
+            "👑 **Add New Admin**\n\n"
+            "Please send the **Telegram User ID** or **@username** of the user you want to authorize as Bot Admin.\n\n"
+            "Send /cancel to cancel.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="ub_cancel_admin_prompt")]
+            ])
+        )
+        await query.answer()
+        return
+
+    # Cancel Add Admin prompt
+    if data == "ub_cancel_admin_prompt":
+        pending_auth.pop(user_id, None)
+        text, markup = await _build_admin_management_panel()
+        await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+        await query.answer("❌ Cancelled")
+        return
+
+    # Owner: Delete Admin by button
+    if data.startswith("ub_deladmin_btn:"):
+        if not is_owner(user_id):
+            return await query.answer("❌ Only Bot Owner can remove admins.", show_alert=True)
+
+        target_id = int(data.split(":", 1)[1])
+        await remove_admin(target_id)
+        await query.answer(f"🗑 Admin {target_id} removed!", show_alert=True)
+        text, markup = await _build_admin_management_panel()
+        try:
+            await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+        except Exception:
+            pass
+        return
+
+    # Open Individual Userbot Panel
+    if data.startswith("ub_panel:"):
+        account_id = data.split(":", 1)[1]
+        can_manage, _ = await _can_manage_account(user_id, account_id)
+        if not can_manage:
+            return await query.answer("❌ You do not have permission to manage this userbot.", show_alert=True)
+
+        text, markup = await _build_userbot_panel(account_id, user_id)
+        try:
+            await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    # Add New Userbot (Owner or Admin)
     if data == "ub_add":
-        pending_auth[query.from_user.id] = {
+        pending_auth[user_id] = {
             "step": "phone",
             "created_at": time.time(),
         }
@@ -259,8 +599,8 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
         return
 
     if data == "ub_cancel_auth":
-        pending_auth.pop(query.from_user.id, None)
-        text, markup = await _build_main_dashboard()
+        pending_auth.pop(user_id, None)
+        text, markup = await _build_main_dashboard(user_id)
         await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
         await query.answer("❌ Operation cancelled")
         return
@@ -268,10 +608,14 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
     # Toggle AutoChat
     if data.startswith("ub_toggle:"):
         account_id = data.split(":", 1)[1]
+        can_manage, _ = await _can_manage_account(user_id, account_id)
+        if not can_manage:
+            return await query.answer("❌ You do not have permission to manage this userbot.", show_alert=True)
+
         new_state = await userbot_manager.toggle_autochat(account_id)
         state_str = "ON" if new_state else "OFF"
         await query.answer(f"✅ AutoChat is now {state_str}!", show_alert=True)
-        text, markup = await _build_userbot_panel(account_id)
+        text, markup = await _build_userbot_panel(account_id, user_id)
         try:
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
         except Exception:
@@ -281,7 +625,11 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
     # Open Speed Menu
     if data.startswith("ub_speed:"):
         account_id = data.split(":", 1)[1]
-        text, markup = await _build_speed_menu(account_id)
+        can_manage, _ = await _can_manage_account(user_id, account_id)
+        if not can_manage:
+            return await query.answer("❌ You do not have permission to manage this userbot.", show_alert=True)
+
+        text, markup = await _build_speed_menu(account_id, user_id)
         try:
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
         except Exception:
@@ -295,29 +643,33 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
         account_id = parts[1]
         mode = parts[2]
 
+        can_manage, _ = await _can_manage_account(user_id, account_id)
+        if not can_manage:
+            return await query.answer("❌ You do not have permission to manage this userbot.", show_alert=True)
+
         if mode == "fast":
             await userbot_manager.set_speed(account_id, delay=0, mode="fast")
             await query.answer("⚡ Fast mode set! (Instant reply)", show_alert=True)
-            text, markup = await _build_speed_menu(account_id)
+            text, markup = await _build_speed_menu(account_id, user_id)
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
             return
 
         elif mode == "medium":
             await userbot_manager.set_speed(account_id, delay=5, mode="medium")
             await query.answer("⏱ Medium mode set! (5s delay)", show_alert=True)
-            text, markup = await _build_speed_menu(account_id)
+            text, markup = await _build_speed_menu(account_id, user_id)
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
             return
 
         elif mode == "slow":
             await userbot_manager.set_speed(account_id, delay=10, mode="slow")
             await query.answer("🐢 Slow mode set! (10s delay)", show_alert=True)
-            text, markup = await _build_speed_menu(account_id)
+            text, markup = await _build_speed_menu(account_id, user_id)
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
             return
 
         elif mode == "custom":
-            pending_auth[query.from_user.id] = {
+            pending_auth[user_id] = {
                 "step": "custom_delay",
                 "account_id": account_id,
                 "created_at": time.time(),
@@ -336,13 +688,17 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
     # Restart Userbot
     if data.startswith("ub_restart:"):
         account_id = data.split(":", 1)[1]
+        can_manage, _ = await _can_manage_account(user_id, account_id)
+        if not can_manage:
+            return await query.answer("❌ You do not have permission to manage this userbot.", show_alert=True)
+
         await query.answer("🔄 Restarting userbot...", show_alert=False)
         success = await userbot_manager.restart_account(account_id)
         if success:
             await query.answer("✅ Userbot restarted successfully!", show_alert=True)
         else:
             await query.answer("❌ Failed to restart userbot. Session may be expired.", show_alert=True)
-        text, markup = await _build_userbot_panel(account_id)
+        text, markup = await _build_userbot_panel(account_id, user_id)
         try:
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
         except Exception:
@@ -352,9 +708,9 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
     # Account Info
     if data.startswith("ub_info:"):
         account_id = data.split(":", 1)[1]
-        acc = await get_account(account_id)
-        if not acc:
-            await query.answer("❌ Account not found", show_alert=True)
+        can_manage, acc = await _can_manage_account(user_id, account_id)
+        if not can_manage or not acc:
+            await query.answer("❌ Unauthorized / Account not found", show_alert=True)
             return
 
         in_mem = ub_accounts.get(account_id, {})
@@ -370,6 +726,10 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
         speed_mode = in_mem.get("speed_mode", acc.get("speed_mode", "fast"))
         speed_label = _format_speed_label(speed_mode, delay)
 
+        added_by = acc.get("added_by", "Owner")
+        owner_id = int(config.OWNER_ID) if config.OWNER_ID else None
+        creator_str = "👑 Owner" if (owner_id and int(added_by) == owner_id) else f"👤 Admin (`{added_by}`)"
+
         info_text = (
             "👤 **Userbot Account Info**\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -377,6 +737,7 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
             f"👤 **Username:** @{username if username else '—'}\n"
             f"📛 **Name:** {name}\n"
             f"📱 **Phone:** `{phone_masked}`\n"
+            f"🛡 **Added By:** {creator_str}\n"
             f"📊 **Connection:** {status_str}\n"
             f"🤖 **AutoChat:** {autochat_str}\n"
             f"⚡ **Speed:** {speed_label}\n"
@@ -392,9 +753,11 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
     # Remove Confirmation
     if data.startswith("ub_remove:"):
         account_id = data.split(":", 1)[1]
-        acc = await get_account(account_id)
-        name = acc.get("name", "this userbot") if acc else "this userbot"
+        can_manage, acc = await _can_manage_account(user_id, account_id)
+        if not can_manage:
+            return await query.answer("❌ You do not have permission to remove this userbot.", show_alert=True)
 
+        name = acc.get("name", "this userbot") if acc else "this userbot"
         confirm_text = (
             f"⚠️ **Are you sure you want to remove {name}?**\n\n"
             "Its Pyrogram client will be stopped and its session will be deleted."
@@ -412,9 +775,13 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
     # Remove Confirmed
     if data.startswith("ub_rm_confirm:"):
         account_id = data.split(":", 1)[1]
+        can_manage, _ = await _can_manage_account(user_id, account_id)
+        if not can_manage:
+            return await query.answer("❌ You do not have permission to remove this userbot.", show_alert=True)
+
         await userbot_manager.remove_account(account_id)
         await query.answer("🗑 Userbot removed successfully!", show_alert=True)
-        text, markup = await _build_main_dashboard()
+        text, markup = await _build_main_dashboard(user_id)
         try:
             await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
         except Exception:
@@ -422,40 +789,101 @@ async def useraccounts_callbacks(_, query: CallbackQuery):
         return
 
 
-# ---------- Owner Private Message Handler (Auth Flow & Custom Delay) ----------
+# ---------- Message Handler (Auth Flow, Custom Delay & Interactive Admin Prompt) ----------
 
 @Radhe.on_message(filters.private & ~filters.bot & ~filters.forwarded, group=-1)
-async def userbot_auth_messages_handler(_, m: Message):
-    """Handle owner's auth messages (Phone, OTP, 2FA, Custom Delay input)."""
-    owner_id = m.from_user.id
-    if not _is_owner(owner_id):
+async def userbot_auth_messages_handler(client: Radhe, m: Message):
+    """Handle owner & admin auth messages (Phone, OTP, 2FA, Custom Delay, Add Admin input)."""
+    user_id = m.from_user.id
+
+    if not (await is_admin(user_id)):
         m.continue_propagation()
         return
 
-    if owner_id not in pending_auth:
+    if user_id not in pending_auth:
         m.continue_propagation()
         return
 
     text = (m.text or "").strip()
 
-    # Allow owner to cancel with /cancel
+    # Cancel handling
     if text == "/cancel":
-        flow = pending_auth.pop(owner_id, None)
+        flow = pending_auth.pop(user_id, None)
         if flow and "account_id" in flow:
-            text_p, markup_p = await _build_userbot_panel(flow["account_id"])
-            await m.reply("❌ Custom delay setting cancelled.", reply_markup=markup_p)
+            text_p, markup_p = await _build_userbot_panel(flow["account_id"], user_id)
+            await m.reply("❌ Setting cancelled.", reply_markup=markup_p)
+        elif flow and flow.get("step") == "add_admin":
+            text_a, markup_a = await _build_admin_management_panel()
+            await m.reply("❌ Add admin cancelled.", reply_markup=markup_a)
         else:
-            text_m, markup_m = await _build_main_dashboard()
+            text_m, markup_m = await _build_main_dashboard(user_id)
             await m.reply("❌ Operation cancelled.", reply_markup=markup_m)
         m.stop_propagation()
         return
 
-    flow = pending_auth[owner_id]
+    flow = pending_auth[user_id]
     step = flow.get("step")
+
+    # Step: Owner Add Admin interactive input
+    if step == "add_admin":
+        if not is_owner(user_id):
+            pending_auth.pop(user_id, None)
+            m.continue_propagation()
+            return
+
+        target_user_id = None
+        target_name = ""
+        target_username = ""
+
+        try:
+            if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+                target_user_id = int(text)
+            else:
+                user_obj = await client.get_users(text)
+                target_user_id = user_obj.id
+                target_name = f"{user_obj.first_name or ''} {user_obj.last_name or ''}".strip()
+                target_username = user_obj.username or ""
+        except Exception as e:
+            await m.reply(f"❌ Could not resolve user `{text}`: {e}\nPlease check and try again (or /cancel):")
+            m.stop_propagation()
+            return
+
+        if not target_name:
+            try:
+                user_obj = await client.get_users(target_user_id)
+                target_name = f"{user_obj.first_name or ''} {user_obj.last_name or ''}".strip()
+                target_username = user_obj.username or ""
+            except Exception:
+                target_name = f"User {target_user_id}"
+
+        pending_auth.pop(user_id, None)
+        success = await add_admin(target_user_id, added_by=user_id, name=target_name, username=target_username)
+        if success:
+            await m.reply(
+                "✅ **Admin Added Successfully!**\n\n"
+                f"👤 **Name:** {target_name}\n"
+                f"🆔 **ID:** `{target_user_id}`\n"
+                f"🔗 **Username:** @{target_username if target_username else '—'}\n\n"
+                "This user can now use `/useraccounts` in bot PM to add and manage their own userbots!"
+            )
+            admin_text, admin_markup = await _build_admin_management_panel()
+            await m.reply_text(admin_text, reply_markup=admin_markup)
+        else:
+            await m.reply("❌ Failed to add admin to database.")
+
+        m.stop_propagation()
+        return
 
     # Step: Custom Delay input
     if step == "custom_delay":
         account_id = flow.get("account_id")
+        can_manage, _ = await _can_manage_account(user_id, account_id)
+        if not can_manage:
+            pending_auth.pop(user_id, None)
+            await m.reply("❌ Unauthorized for this account.")
+            m.stop_propagation()
+            return
+
         if not re.fullmatch(r"^\d+$", text):
             await m.reply("❌ Please enter a valid positive number in seconds (e.g. `3`, `8`, `20`):")
             m.stop_propagation()
@@ -467,11 +895,11 @@ async def userbot_auth_messages_handler(_, m: Message):
             m.stop_propagation()
             return
 
-        pending_auth.pop(owner_id, None)
+        pending_auth.pop(user_id, None)
         await userbot_manager.set_speed(account_id, delay=delay, mode="custom")
         await m.reply(f"✅ **Custom delay set to {delay} seconds!**")
 
-        text_panel, markup_panel = await _build_userbot_panel(account_id)
+        text_panel, markup_panel = await _build_userbot_panel(account_id, user_id)
         await m.reply_text(text_panel, reply_markup=markup_panel, disable_web_page_preview=True)
         m.stop_propagation()
         return
@@ -479,7 +907,7 @@ async def userbot_auth_messages_handler(_, m: Message):
     # Step: Phone number received
     if step == "phone":
         progress_msg = await m.reply("⏳ Connecting to Telegram and sending OTP code...")
-        success, response = await start_login_flow(owner_id, text)
+        success, response = await start_login_flow(user_id, text)
         await progress_msg.edit_text(response)
         m.stop_propagation()
         return
@@ -487,7 +915,7 @@ async def userbot_auth_messages_handler(_, m: Message):
     # Step: OTP received in ONE SINGLE MESSAGE (e.g. "1 2 3 4 5")
     if step == "otp":
         progress_msg = await m.reply("⏳ Verifying OTP...")
-        success, status, result = await process_otp_input(owner_id, text)
+        success, status, result = await process_otp_input(user_id, text)
 
         if success and status == "SUCCESS":
             acc_info = result
@@ -503,7 +931,7 @@ async def userbot_auth_messages_handler(_, m: Message):
             await progress_msg.edit_text(success_card)
 
             # Show individual panel for new userbot
-            p_text, p_markup = await _build_userbot_panel(acc_info["account_id"])
+            p_text, p_markup = await _build_userbot_panel(acc_info["account_id"], user_id)
             await m.reply_text(p_text, reply_markup=p_markup, disable_web_page_preview=True)
 
         elif status == "2FA_REQUIRED":
@@ -524,7 +952,7 @@ async def userbot_auth_messages_handler(_, m: Message):
     # Step: 2FA Password received
     if step == "2fa":
         progress_msg = await m.reply("⏳ Verifying 2FA password...")
-        success, status, result = await process_2fa_input(owner_id, text)
+        success, status, result = await process_2fa_input(user_id, text)
 
         if success and status == "SUCCESS":
             acc_info = result
@@ -540,7 +968,7 @@ async def userbot_auth_messages_handler(_, m: Message):
             await progress_msg.edit_text(success_card)
 
             # Show individual panel for new userbot
-            p_text, p_markup = await _build_userbot_panel(acc_info["account_id"])
+            p_text, p_markup = await _build_userbot_panel(acc_info["account_id"], user_id)
             await m.reply_text(p_text, reply_markup=p_markup, disable_web_page_preview=True)
 
         else:
