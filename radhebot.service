@@ -1,0 +1,20 @@
+[Unit]
+Description=Radhe Multi-Userbot Telegram Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/AyushChatBot
+ExecStart=/root/AyushChatBot/venv/bin/python3 -m Radhe
+Restart=always
+RestartSec=5
+EnvironmentFile=/root/AyushChatBot/.env
+
+# Standard output and error to syslog
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=radhebot
+
+[Install]
+WantedBy=multi-user.target

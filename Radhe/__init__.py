@@ -1,17 +1,33 @@
+import sys
 import logging 
 import time
 from Abg import patch
 
 from motor.motor_asyncio import AsyncIOMotorClient as MongoCli
+import pyrogram.utils
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 
+# Patch Pyrogram for 64-bit Telegram Channel IDs (> 2 billion)
+pyrogram.utils.MIN_CHANNEL_ID = -1009999999999
+pyrogram.utils.MIN_CHAT_ID = -999999999999
+
 import config
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 logging.basicConfig(
     format="[%(asctime)s - %(levelname)s] - %(name)s - %(message)s",
     datefmt="%d-%b-%y %H:%M:%S",
-    handlers=[logging.FileHandler("log.txt"), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler("log.txt", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
     level=logging.INFO,
 )
 
@@ -43,6 +59,10 @@ class Radhe(Client):
             in_memory=True,
             parse_mode=ParseMode.DEFAULT,
         )
+        self.id = None
+        self.name = "Radhe"
+        self.username = None
+        self.mention = ""
 
     async def start(self):
         await super().start()

@@ -17,3 +17,6 @@ SUPPORT_GRP = getenv("SUPPORT_GRP", "tmm_support_chat")
 UPDATE_CHNL = getenv("UPDATE_CHNL", "FROZENTOOLS")
 OWNER_USERNAME = getenv("OWNER_USERNAME", "moh_maya_official")
 
+# Userbot configuration
+USERBOT_AUTOCHAT_DEFAULT = getenv("USERBOT_AUTOCHAT_DEFAULT", "true").lower() == "true"
+

@@ -128,3 +128,6 @@ async def cb_handler(_, query: CallbackQuery):
             )
         else:
             await query.edit_message_text("**ᴄʜᴀᴛ-ʙᴏᴛ ᴀʟʀᴇᴀᴅʏ ᴅɪsᴀʙʟᴇᴅ.**")
+
+    else:
+        query.continue_propagation()

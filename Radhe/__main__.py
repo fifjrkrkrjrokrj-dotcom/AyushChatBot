@@ -8,6 +8,7 @@ from pyrogram import idle
 
 from Radhe import LOGGER, Radhe
 from Radhe.modules import ALL_MODULES
+from Radhe.userbot import userbot_manager
 
 # ─────────────────────────────────────
 # 1️⃣ Flask app (Render ke liye REQUIRED)
@@ -36,11 +37,25 @@ async def start_bot():
         importlib.import_module("Radhe.modules." + module)
 
     LOGGER.info(f"@{Radhe.username} Started Successfully")
+
+    # Startup recovery for userbot accounts
+    try:
+        await userbot_manager.startup()
+        LOGGER.info("✅ Multi-Userbot Manager Initialized Successfully")
+    except Exception as ex:
+        LOGGER.error(f"⚠️ Userbot Manager Startup Error: {ex}")
+
     await idle()
+
+    # Graceful stop on shutdown
+    try:
+        await userbot_manager.stop()
+    except Exception:
+        pass
 
 # ─────────────────────────────────────
 # 3️⃣ Start Flask + Bot Together
 # ─────────────────────────────────────
 if __name__ == "__main__":
-    Thread(target=run_flask).start()   # Flask server (Render port bind)
+    Thread(target=run_flask, daemon=True).start()   # Flask server (Render port bind)
     asyncio.get_event_loop().run_until_complete(start_bot())

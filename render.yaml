@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: radhe-chatbot
+    runtime: python
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python3 -m Radhe
+    plan: free
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: MONGO_URL
+        sync: false
+      - key: OWNER_USERNAME
+        sync: false
+      - key: USERBOT_AUTOCHAT_DEFAULT
+        value: "true"
+      - key: PORT
+        value: "5000"

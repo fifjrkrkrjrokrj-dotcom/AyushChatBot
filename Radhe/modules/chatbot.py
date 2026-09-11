@@ -21,8 +21,12 @@ async def create_indexes():
         except Exception as e:
             print("Failed to create index:", e)
 
-# Schedule background task to run index creation
-asyncio.create_task(create_indexes())
+# Schedule background task to run index creation if loop is running
+try:
+    loop = asyncio.get_running_loop()
+    loop.create_task(create_indexes())
+except RuntimeError:
+    pass
 
 
 def clean_word(word: str) -> str:
